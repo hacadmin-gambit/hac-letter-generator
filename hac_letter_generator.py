@@ -11,7 +11,7 @@ import re
 import zipfile
 
 st.set_page_config(page_title="HAC Letter Generator", layout="centered")
-st.title("📄 Hyrbdi Asset Custody Letter Generator")
+st.title("📄 Hybrid Asset Custody Letter Generator")
 
 # -----------------------------
 # Template registry

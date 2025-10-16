@@ -493,7 +493,28 @@ if uploaded_excel:
 # -----------------------------
 # Downloads & housekeeping
 # -----------------------------
+# -----------------------------
+# Downloads & housekeeping
+# -----------------------------
 if st.session_state.get("generated_docs"):
+    # Build a ZIP in memory containing all generated files
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in st.session_state["generated_docs"]:
+            # Each entry keeps the original filename inside the zip
+            zf.writestr(file["filename"], file["buffer"])
+    zip_buffer.seek(0)
+
+    # Download-all button
+    st.download_button(
+        label="📦 Download all as ZIP",
+        data=zip_buffer,
+        file_name="HAC_Letters.zip",
+        mime="application/zip",
+        key="download_all_zip",
+    )
+
+    # Individual file buttons
     for i, file in enumerate(st.session_state["generated_docs"]):
         st.download_button(
             label=f"🗕️ Download: {file['filename']}",
@@ -508,3 +529,4 @@ if st.session_state.get("generated_docs"):
         st.rerun()
 else:
     st.warning("📌 Please upload the Excel file to begin.")
+

@@ -34,6 +34,8 @@ template_options = {
     "Commission Letter (7th)": "templates/Commission Letter (7th).docx",
     "HAC AGREEMENT": "templates/HAC Agreement.docx",
     "Dividend Letter": "templates/Letter of Dividend Payout.docx",
+    "Dividend Letter (RPS)": "templates/Letter of Dividend Payout (RPS).docx",
+    "Dividend Letter (GGFT)": "templates/Letter of Dividend Payout (GGFT).docx",
 }
 
 # -----------------------------

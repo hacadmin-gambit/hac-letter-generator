@@ -33,9 +33,9 @@ template_options = {
     "Trust Deed": "templates/Trust Deed.docx",
     "Commission Letter (7th)": "templates/Commission Letter (7th).docx",
     "HAC AGREEMENT": "templates/HAC Agreement.docx",
-    "Dividend Letter": "templates/Letter of Dividend Payout.docx",
-    "Dividend Letter (RPS)": "templates/Letter of Dividend Payout (RPS).docx",
-    "Dividend Letter (GGFT)": "templates/Letter of Dividend Payout (GGFT).docx",
+    "Letter of Dividend Payout": "templates/Letter of Dividend Payout.docx",
+    "Letter of Dividend Payout (RPS)": "templates/Letter of Dividend Payout (RPS).docx",
+    "Letter of Dividend Payout (GGFT)": "templates/Letter of Dividend Payout (GGFT).docx",
 }
 
 # -----------------------------

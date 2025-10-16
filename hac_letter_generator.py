@@ -230,7 +230,7 @@ if uploaded_excel:
                 data = {str(k).strip().upper(): ("" if pd.isna(v) else norm(str(v))) for k, v in row.items()}
 
                 # --- Amount formatting fix (exactly 2 decimals, no thousands comma) ---
-                for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED", "TRUST CAPITAL"]:
+                for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED", "TRUST_CAPITAL"]:
                     if field in data and data[field]:
                         try:
                             data[field] = f"{float(data[field]):.2f}"

@@ -401,6 +401,13 @@ if uploaded_excel:
                         data[field] = _to_2dp(data[field])
                 # --- End of amount fix ---
 
+                # --- Add tab spacing for MONTH placeholder ---
+                if "MONTH" in data and re.match(r"^[A-Za-z]+\s+\d{4}$", data["MONTH"]):
+                    # Converts "October 2025" → "October\t2025"
+                    data["MONTH"] = re.sub(r"\s+(\d{4})", r"\t\1", data["MONTH"])
+                # --- End of month tab fix ---
+
+
                 # Final normalized types for downstream logic
                 letter_type = norm(letter_type_raw)
                 payout_type = norm(data.get("PAYOUT_TYPE", ""))

@@ -38,7 +38,7 @@ template_options = {
 # -----------------------------
 
 def norm(s: str) -> str:
-    """Trim and collapse inner spaces. Newlines removed."""
+    """Trim and collapse inner spaces into one space."""
     return re.sub(r"\s+", " ", s.strip()) if isinstance(s, str) else ""
 
 def norm_multiline(s: str) -> str:
@@ -47,9 +47,22 @@ def norm_multiline(s: str) -> str:
         return ""
     s = str(s)
     s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n")
-    # Trim spaces around each line but keep \n
     lines = [ln.strip() for ln in s.split("\n")]
     return "\n".join(lines).strip()
+
+def auto_multiline_address(s: str) -> str:
+    """
+    If address is a single line, split on commas into neat lines.
+    Keep existing line breaks if already present.
+    """
+    if s is None:
+        return ""
+    s = str(s)
+    if "\n" in s:
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        return "\n".join(part.strip() for part in s.split("\n") if part.strip())
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return "\n".join(parts)
 
 def extract_placeholders(doc: Document) -> set:
     """Find all {{PLACEHOLDER}} in paragraphs and tables."""
@@ -96,6 +109,7 @@ def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_m
                     ph = '{{' + orig + '}}'
                     val = mapping.get(up, '') or ''
                     if ph in xml_text:
+                        xml_text = xml_text.replace("\t" + ph, ph).replace(ph + "\t", ph)
                         xml_text = xml_text.replace(ph, str(val))
                 data_bytes = xml_text.encode('utf-8')
             zout.writestr(item, data_bytes)
@@ -121,83 +135,6 @@ def _copy_run_format(src: Run, dst: Run) -> None:
         except Exception:
             pass
 
-def _replace_placeholders_preserving_runs(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> None:
-    """
-    Replace {{PLACEHOLDER}} even when split across runs.
-    Keep formatting by applying the formatting of the run where the placeholder starts.
-    Supports multiline values by inserting line breaks.
-    """
-    if not paragraph.runs:
-        return
-
-    runs = paragraph.runs
-    concat = ""
-    spans = []
-    for idx, r in enumerate(runs):
-        start = len(concat)
-        concat += r.text
-        spans.append((idx, start, len(concat)))
-
-    def _find_span(pos: int):
-        for idx, s, e in spans:
-            if s <= pos < e:
-                return idx, s, e
-        return spans[-1][0], spans[-1][1], spans[-1][2]
-
-    changed = True
-    while changed:
-        changed = False
-        for orig, up in placeholders_upper.items():
-            needle = "{{" + orig + "}}"
-            pos = concat.find(needle)
-            if pos == -1:
-                continue
-
-            changed = True
-            start_pos = pos
-            end_pos = pos + len(needle)
-
-            run_start_idx, run_start_s, _ = _find_span(start_pos)
-            run_end_idx, run_end_s, _ = _find_span(end_pos - 1)
-
-            before_text = runs[run_start_idx].text[: start_pos - run_start_s]
-            after_text = runs[run_end_idx].text[end_pos - run_end_s :]
-
-            value = str(data_map.get(up, ""))
-
-            # Prepare first run text
-            runs[run_start_idx].text = before_text
-
-            # Insert replacement with possible line breaks, preserving style
-            first = True
-            for i, line in enumerate(value.split("\n")):
-                if first:
-                    # append to the start run
-                    runs[run_start_idx].text += line
-                    first = False
-                else:
-                    r = paragraph.add_run()
-                    _copy_run_format(runs[run_start_idx], r)
-                    r.add_break()
-                    r.add_text(line)
-
-            # Clear fully covered middle runs
-            for i in range(run_start_idx + 1, run_end_idx):
-                runs[i].text = ""
-
-            # Put trailing text back into the end run
-            if run_end_idx != run_start_idx:
-                runs[run_end_idx].text = after_text
-
-            # Rebuild concat map
-            concat = ""
-            spans = []
-            for idx, r in enumerate(paragraph.runs):
-                s = len(concat)
-                concat += r.text
-                spans.append((idx, s, len(concat)))
-            break
-
 def _walk_block_items(doc: Document):
     """Yield all paragraphs from the document, including those in tables."""
     for p in doc.paragraphs:
@@ -211,15 +148,66 @@ def _walk_block_items(doc: Document):
 def _to_2dp(value: str) -> str:
     """Sanitize a numeric-like string and format to two decimals."""
     s = str(value).strip()
-    # remove spaces, commas, currency and letters, keep digits, dot, minus
     s = s.replace(",", "")
     s = re.sub(r"[^0-9.\-]", "", s)
-    if s == "" or s == "." or s == "-" or s == "-.":
+    if s in {"", ".", "-", "-."}:
         return ""
     try:
         return f"{float(s):.2f}"
     except ValueError:
         return ""
+
+# -------- Paragraph-level multiline replacer (removes tabs) --------
+
+def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> bool:
+    """
+    If paragraph contains a placeholder whose value has newline(s), rebuild the entire paragraph:
+    - remove tabs around the placeholder
+    - write clean runs and insert hard line breaks
+    Returns True if a replacement was made.
+    """
+    text = paragraph.text
+    did = False
+    for orig, up in placeholders_upper.items():
+        ph = f"{{{{{orig}}}}}"
+        value = str(data_map.get(up, ""))
+        if ph in text and ("\n" in value):
+            did = True
+            text = text.replace("\t" + ph, ph).replace(ph + "\t", ph)
+            text = text.replace("\t", " ")
+            before, after = text.split(ph, 1)
+
+            for r in list(paragraph.runs):
+                r.text = ""
+            paragraph.text = ""
+
+            if before:
+                paragraph.add_run(before)
+
+            lines = value.split("\n")
+            if lines:
+                paragraph.add_run(lines[0])
+                for line in lines[1:]:
+                    paragraph.add_run().add_break()
+                    paragraph.add_run(line)
+
+            if after:
+                paragraph.add_run(after)
+            break
+    return did
+
+def _replace_simple_inrun(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> None:
+    """Simple in-run replacements for placeholders whose values are single-line."""
+    for run in list(paragraph.runs):
+        txt = run.text
+        if "{{" not in txt:
+            continue
+        for orig, up in placeholders_upper.items():
+            ph = f"{{{{{orig}}}}}"
+            if ph in txt:
+                val = str(data_map.get(up, ""))
+                if "\n" not in val:
+                    run.text = txt.replace(ph, val)
 
 # -----------------------------
 # UI — Excel upload
@@ -249,17 +237,24 @@ if uploaded_excel:
 
         for index, row in df.iterrows():
             try:
-                # Build data from row as raw strings first
+                # Build raw data from row (no normalization yet)
                 data = {}
                 for k, v in row.items():
                     key = str(k).strip().upper()
                     val = "" if pd.isna(v) else str(v)
                     data[key] = val
 
-                # Preserve line breaks for any ADDRESS-like fields
+                # Peek the letter type early for conditional address logic
+                letter_type_raw = str(data.get("LETTER_TYPE", "")).strip()
+                letter_type_upper = letter_type_raw.upper()
+
+                # Normalize values, with conditional address handling
                 for k in list(data.keys()):
                     if "ADDRESS" in k:
-                        data[k] = norm_multiline(data[k])
+                        if "DIVIDEND" in letter_type_upper:
+                            data[k] = auto_multiline_address(data[k])
+                        else:
+                            data[k] = norm_multiline(data[k])
                     else:
                         data[k] = norm(data[k])
 
@@ -269,7 +264,8 @@ if uploaded_excel:
                         data[field] = _to_2dp(data[field])
                 # --- End of amount fix ---
 
-                letter_type = norm(data.get("LETTER_TYPE", ""))
+                # Final normalized types for downstream logic
+                letter_type = norm(letter_type_raw)
                 payout_type = norm(data.get("PAYOUT_TYPE", ""))
 
                 if not letter_type:
@@ -313,36 +309,18 @@ if uploaded_excel:
                     )
 
                 # -----------------------------
-                # Pass 1: Simple in-run replacement with newline handling
-                # -----------------------------
-                for para in _walk_block_items(doc):
-                    for run in list(para.runs):
-                        text = run.text
-                        if "{{" not in text:
-                            continue
-                        for orig, up in placeholders_upper.items():
-                            ph = f"{{{{{orig}}}}}"
-                            if ph in text:
-                                value = str(data.get(up, ""))
-                                if "\n" in value:
-                                    parts = value.split("\n")
-                                    # set first part on current run
-                                    run.text = text.replace(ph, parts[0])
-                                    # append subsequent lines with breaks using new runs that copy the style
-                                    for line in parts[1:]:
-                                        r = para.add_run()
-                                        _copy_run_format(run, r)
-                                        r.add_break()
-                                        r.add_text(line)
-                                else:
-                                    run.text = text.replace(ph, value)
-
-                # -----------------------------
-                # Pass 2: Cross-run replacement preserving formatting
+                # Pass A: Paragraph-level multiline replacer (kills tabs)
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
-                        _replace_placeholders_preserving_runs(para, placeholders_upper, data)
+                        _replace_multiline_paragraph(para, placeholders_upper, data)
+
+                # -----------------------------
+                # Pass B: Simple single-line in-run replacements
+                # -----------------------------
+                for para in _walk_block_items(doc):
+                    if "{{" in para.text:
+                        _replace_simple_inrun(para, placeholders_upper, data)
 
                 # Save docx first
                 inter_buffer = BytesIO()
@@ -350,7 +328,7 @@ if uploaded_excel:
                 inter_bytes = inter_buffer.getvalue()
 
                 # -----------------------------
-                # Pass 3: Low-level XML replacement for headers/footers/shapes
+                # Pass C: Low-level XML replacement for headers/footers/shapes
                 # -----------------------------
                 final_bytes = replace_in_docx_bytes(inter_bytes, data, placeholders_upper)
 

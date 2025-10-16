@@ -381,14 +381,15 @@ if uploaded_excel:
                     val = "" if pd.isna(v) else str(v)
                     data[key] = val
 
-                # Peek the letter type early for conditional address logic
+                # Peek the letter type early for conditional logic
                 letter_type_raw = str(data.get("LETTER_TYPE", "")).strip()
                 letter_type_upper = letter_type_raw.upper()
+                is_dividend = "DIVIDEND" in letter_type_upper
 
                 # Normalize values, with conditional address handling
                 for k in list(data.keys()):
                     if "ADDRESS" in k:
-                        if "DIVIDEND" in letter_type_upper:
+                        if is_dividend:
                             data[k] = auto_multiline_address(data[k])
                         else:
                             data[k] = norm_multiline(data[k])
@@ -406,7 +407,6 @@ if uploaded_excel:
                     # Converts "October 2025" → "October\t2025"
                     data["MONTH"] = re.sub(r"\s+(\d{4})", r"\t\1", data["MONTH"])
                 # --- End of month tab fix ---
-
 
                 # Final normalized types for downstream logic
                 letter_type = norm(letter_type_raw)
@@ -453,22 +453,24 @@ if uploaded_excel:
                     )
 
                 # -----------------------------
-                # Pass A: Paragraph-level multiline replacer (clears tabs, preserves style)
+                # Pass A: Paragraph-level multiline replacer (ONLY for Dividend)
                 # -----------------------------
-                for para in _walk_block_items(doc):
-                    if "{{" in para.text:
-                        _replace_multiline_paragraph(para, placeholders_upper, data)
+                if is_dividend:
+                    for para in _walk_block_items(doc):
+                        if "{{" in para.text:
+                            _replace_multiline_paragraph(para, placeholders_upper, data)
 
                 # -----------------------------
-                # Pass B: Cross-run replacement for single-line values
+                # Pass B: Cross-run replacement for single-line values (all)
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
                         _replace_placeholders_across_runs(para, placeholders_upper, data)
 
-                # Clean document to avoid stray blank pages
-                _strip_page_breaks(doc)
-                _remove_trailing_blank_paragraphs(doc)
+                # Clean document to avoid stray blank pages (ONLY for Dividend)
+                if is_dividend:
+                    _strip_page_breaks(doc)
+                    _remove_trailing_blank_paragraphs(doc)
 
                 # Save docx first
                 inter_buffer = BytesIO()
@@ -476,7 +478,7 @@ if uploaded_excel:
                 inter_bytes = inter_buffer.getvalue()
 
                 # -----------------------------
-                # Pass C: Low-level XML replacement for headers/footers/shapes
+                # Pass C: Low-level XML replacement for headers/footers/shapes (all)
                 # -----------------------------
                 final_bytes = replace_in_docx_bytes(inter_bytes, data, placeholders_upper)
 

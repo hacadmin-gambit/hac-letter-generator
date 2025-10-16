@@ -164,9 +164,11 @@ def _to_2dp(value: str) -> str:
 def _clear_tab_stops(paragraph: Paragraph) -> None:
     """Remove all tab stops from a paragraph at the XML level."""
     # remove any <w:tabs> definitions
-    tabs_elems = paragraph._element.xpath('.//w:tabs', namespaces=paragraph._element.nsmap)
+    tabs_elems = paragraph._element.xpath(f'.//{{{WNS}}}tabs')
     for tabs in tabs_elems:
-        tabs.getparent().remove(tabs)
+        parent = tabs.getparent()
+        if parent is not None;
+           parent.remove(tabs)
 
 def _strip_tabs(s: str) -> str:
     return s.replace("\t", " ")

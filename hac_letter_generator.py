@@ -139,6 +139,28 @@ def _copy_run_format(src: Run, dst: Run) -> None:
         except Exception:
             pass
 
+def _add_run_copy_style(paragraph: Paragraph, src_run: Run, text: str = "", add_line_break: bool = False) -> Run:
+    """Add a run, cloning inline style from src_run, and optionally add a line break first."""
+    r = paragraph.add_run()
+    r.bold = src_run.bold
+    r.italic = src_run.italic
+    r.underline = src_run.underline
+    if src_run.font is not None:
+        if src_run.font.size:
+            r.font.size = src_run.font.size
+        if src_run.font.name:
+            r.font.name = src_run.font.name
+        try:
+            if src_run.font.color and src_run.font.color.rgb:
+                r.font.color.rgb = src_run.font.color.rgb
+        except Exception:
+            pass
+    if add_line_break:
+        r.add_break()
+    if text:
+        r.add_text(text)
+    return r
+
 def _walk_block_items(doc: Document):
     """Yield all paragraphs from the document, including those in tables."""
     for p in doc.paragraphs:
@@ -164,8 +186,7 @@ def _to_2dp(value: str) -> str:
 # -------- Address paragraph helpers (tab cleanup) --------
 
 def _clear_tab_stops(paragraph: Paragraph) -> None:
-    """Remove all tab stops from a paragraph at the XML level."""
-    # remove any <w:tabs> definitions
+    """Remove all <w:tabs> descendants from this paragraph, no XPath needed."""
     tabs_tag = qn('w:tabs')
     for el in list(paragraph._element.iter()):
         if el.tag == tabs_tag:
@@ -180,23 +201,27 @@ def _strip_tabs(s: str) -> str:
 
 def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> bool:
     """
-    For values containing newline(s), rebuild the entire paragraph cleanly:
+    For values containing newline(s), rebuild the paragraph cleanly:
     - clear tab stops and tab characters
     - insert hard line breaks
-    Returns True if a replacement was made.
+    - keep formatting by cloning from a source run
     """
     text = paragraph.text
     did = False
+
+    src_run = paragraph.runs[0] if paragraph.runs else paragraph.add_run("")
+
     for orig, up in placeholders_upper.items():
         ph = f"{{{{{orig}}}}}"
         value = str(data_map.get(up, ""))
         if ph in text and ("\n" in value):
             did = True
 
-            # Remove any tab characters and tab stops to prevent column effects
+            # Clean tabs and tab stops to prevent column effects
             text = _strip_tabs(text.replace("\t" + ph, ph).replace(ph + "\t", ph))
             _clear_tab_stops(paragraph)
             paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            paragraph.paragraph_format.page_break_before = False
 
             before, after = text.split(ph, 1)
 
@@ -205,24 +230,22 @@ def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict,
                 r.text = ""
             paragraph.text = ""
 
-            # Write before
+            # Write "before" without forcing a newline
             before = before.rstrip()
             if before:
-                paragraph.add_run(before + "\n")
+                _add_run_copy_style(paragraph, src_run, before)
 
             # Write multiline value
             lines = [ln.rstrip() for ln in value.split("\n")]
             if lines:
-                paragraph.add_run(lines[0])
+                _add_run_copy_style(paragraph, src_run, lines[0])
                 for line in lines[1:]:
-                    paragraph.add_run().add_break()
-                    paragraph.add_run(line)
+                    _add_run_copy_style(paragraph, src_run, line, add_line_break=True)
 
-            # Write after
+            # Write "after" on a new visual line only if text exists
             after = after.lstrip()
             if after:
-                paragraph.add_run().add_break()
-                paragraph.add_run(after)
+                _add_run_copy_style(paragraph, src_run, after, add_line_break=True)
 
             break
     return did
@@ -288,6 +311,37 @@ def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: 
                 s = len(concat)
                 concat += r.text
                 spans.append((idx, s, len(concat)))
+            break
+
+# -------- Document cleanup to avoid blank last page --------
+
+def _strip_page_breaks(doc: Document) -> None:
+    """Remove manual page breaks and 'page break before' flags."""
+    # Turn off "page break before" everywhere
+    for p in doc.paragraphs:
+        if p.paragraph_format:
+            p.paragraph_format.page_break_before = False
+
+    # Remove manual page-break BRs inside runs
+    br_tag = qn('w:br')
+    type_attr = qn('w:type')
+    for p in doc.paragraphs:
+        for r in p.runs:
+            for el in list(r._r):
+                if el.tag == br_tag and el.get(type_attr) == 'page':
+                    r._r.remove(el)
+
+def _remove_trailing_blank_paragraphs(doc: Document) -> None:
+    """Drop empty tail paragraphs that can trigger an extra page."""
+    while doc.paragraphs:
+        p = doc.paragraphs[-1]
+        txt = p.text.strip()
+        only_empty_runs = all((run.text.strip() == "") for run in p.runs)
+        if txt == "" and only_empty_runs:
+            p._element.getparent().remove(p._element)
+        else:
+            if p.paragraph_format:
+                p.paragraph_format.page_break_before = False
             break
 
 # -----------------------------
@@ -390,7 +444,7 @@ if uploaded_excel:
                     )
 
                 # -----------------------------
-                # Pass A: Paragraph-level multiline replacer (clears tabs)
+                # Pass A: Paragraph-level multiline replacer (clears tabs, preserves style)
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
@@ -402,6 +456,10 @@ if uploaded_excel:
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
                         _replace_placeholders_across_runs(para, placeholders_upper, data)
+
+                # Clean document to avoid stray blank pages
+                _strip_page_breaks(doc)
+                _remove_trailing_blank_paragraphs(doc)
 
                 # Save docx first
                 inter_buffer = BytesIO()

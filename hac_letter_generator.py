@@ -11,6 +11,9 @@ import os
 import re
 import zipfile
 
+# WordprocessingML namespace for Clark-notation XPath
+WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
 st.set_page_config(page_title="HAC Letter Generator", layout="centered")
 st.title("📄 Hybrid Asset Custody Letter Generator")
 

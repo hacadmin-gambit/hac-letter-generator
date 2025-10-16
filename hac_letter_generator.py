@@ -167,7 +167,7 @@ def _clear_tab_stops(paragraph: Paragraph) -> None:
     tabs_elems = paragraph._element.xpath(f'.//{{{WNS}}}tabs')
     for tabs in tabs_elems:
         parent = tabs.getparent()
-        if parent is not None;
+        if parent is not None:
            parent.remove(tabs)
 
 def _strip_tabs(s: str) -> str:

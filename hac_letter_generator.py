@@ -4,6 +4,7 @@ from docx.text.paragraph import Paragraph
 from docx.table import _Cell, Table
 from docx.text.run import Run
 from docx.shared import RGBColor
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import pandas as pd
 from io import BytesIO
 import os
@@ -53,7 +54,7 @@ def norm_multiline(s: str) -> str:
 def auto_multiline_address(s: str) -> str:
     """
     If address is a single line, split on commas into neat lines.
-    Keep existing line breaks if already present.
+    Keep existing line breaks if already present. Preserve commas at line ends.
     """
     if s is None:
         return ""
@@ -62,7 +63,7 @@ def auto_multiline_address(s: str) -> str:
         s = s.replace("\r\n", "\n").replace("\r", "\n")
         return "\n".join(part.strip() for part in s.split("\n") if part.strip())
     parts = [p.strip() for p in s.split(",") if p.strip()]
-    return "\n".join(parts)
+    return "\n".join(f"{p}," if i < len(parts) - 1 else p for i, p in enumerate(parts))
 
 def extract_placeholders(doc: Document) -> set:
     """Find all {{PLACEHOLDER}} in paragraphs and tables."""
@@ -109,6 +110,7 @@ def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_m
                     ph = '{{' + orig + '}}'
                     val = mapping.get(up, '') or ''
                     if ph in xml_text:
+                        # also soften tabs adjacent to placeholders in these parts
                         xml_text = xml_text.replace("\t" + ph, ph).replace(ph + "\t", ph)
                         xml_text = xml_text.replace(ph, str(val))
                 data_bytes = xml_text.encode('utf-8')
@@ -157,13 +159,25 @@ def _to_2dp(value: str) -> str:
     except ValueError:
         return ""
 
-# -------- Paragraph-level multiline replacer (removes tabs) --------
+# -------- Address paragraph helpers (tab cleanup) --------
+
+def _clear_tab_stops(paragraph: Paragraph) -> None:
+    """Remove all tab stops from a paragraph at the XML level."""
+    # remove any <w:tabs> definitions
+    tabs_elems = paragraph._element.xpath('.//w:tabs', namespaces=paragraph._element.nsmap)
+    for tabs in tabs_elems:
+        tabs.getparent().remove(tabs)
+
+def _strip_tabs(s: str) -> str:
+    return s.replace("\t", " ")
+
+# -------- Multiline paragraph rebuild (handles ADDRESS neatly) --------
 
 def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> bool:
     """
-    If paragraph contains a placeholder whose value has newline(s), rebuild the entire paragraph:
-    - remove tabs around the placeholder
-    - write clean runs and insert hard line breaks
+    For values containing newline(s), rebuild the entire paragraph cleanly:
+    - clear tab stops and tab characters
+    - insert hard line breaks
     Returns True if a replacement was made.
     """
     text = paragraph.text
@@ -173,41 +187,103 @@ def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict,
         value = str(data_map.get(up, ""))
         if ph in text and ("\n" in value):
             did = True
-            text = text.replace("\t" + ph, ph).replace(ph + "\t", ph)
-            text = text.replace("\t", " ")
+
+            # Remove any tab characters and tab stops to prevent column effects
+            text = _strip_tabs(text.replace("\t" + ph, ph).replace(ph + "\t", ph))
+            _clear_tab_stops(paragraph)
+            paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
             before, after = text.split(ph, 1)
 
+            # Clear paragraph
             for r in list(paragraph.runs):
                 r.text = ""
             paragraph.text = ""
 
+            # Write before
+            before = before.rstrip()
             if before:
-                paragraph.add_run(before)
+                paragraph.add_run(before + "\n")
 
-            lines = value.split("\n")
+            # Write multiline value
+            lines = [ln.rstrip() for ln in value.split("\n")]
             if lines:
                 paragraph.add_run(lines[0])
                 for line in lines[1:]:
                     paragraph.add_run().add_break()
                     paragraph.add_run(line)
 
+            # Write after
+            after = after.lstrip()
             if after:
+                paragraph.add_run().add_break()
                 paragraph.add_run(after)
+
             break
     return did
 
-def _replace_simple_inrun(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> None:
-    """Simple in-run replacements for placeholders whose values are single-line."""
-    for run in list(paragraph.runs):
-        txt = run.text
-        if "{{" not in txt:
-            continue
+# -------- Cross-run replacer for single-line placeholders --------
+
+def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> None:
+    """
+    Replace {{PLACEHOLDER}} even when split across runs.
+    Handles single-line values. Preserves formatting of the starting run.
+    """
+    if not paragraph.runs:
+        return
+
+    runs = paragraph.runs
+    concat = ""
+    spans = []
+    for idx, r in enumerate(runs):
+        start = len(concat)
+        concat += r.text
+        spans.append((idx, start, len(concat)))
+
+    def _find_span(pos: int):
+        for idx, s, e in spans:
+            if s <= pos < e:
+                return idx, s, e
+        return spans[-1][0], spans[-1][1], spans[-1][2]
+
+    changed = True
+    while changed:
+        changed = False
         for orig, up in placeholders_upper.items():
-            ph = f"{{{{{orig}}}}}"
-            if ph in txt:
-                val = str(data_map.get(up, ""))
-                if "\n" not in val:
-                    run.text = txt.replace(ph, val)
+            ph = "{{" + orig + "}}"
+            pos = concat.find(ph)
+            if pos == -1:
+                continue
+
+            value = str(data_map.get(up, ""))
+            if "\n" in value:
+                # multiline handled by the paragraph rebuild pass
+                continue
+
+            changed = True
+            start_pos = pos
+            end_pos = pos + len(ph)
+
+            rs_idx, rs_s, _ = _find_span(start_pos)
+            re_idx, re_s, _ = _find_span(end_pos - 1)
+
+            before = runs[rs_idx].text[: start_pos - rs_s]
+            after = runs[re_idx].text[end_pos - re_s :]
+
+            runs[rs_idx].text = before + value
+            for i in range(rs_idx + 1, re_idx):
+                runs[i].text = ""
+            if re_idx != rs_idx:
+                runs[re_idx].text = after
+
+            # rebuild concat
+            concat = ""
+            spans = []
+            for idx, r in enumerate(paragraph.runs):
+                s = len(concat)
+                concat += r.text
+                spans.append((idx, s, len(concat)))
+            break
 
 # -----------------------------
 # UI — Excel upload
@@ -309,18 +385,18 @@ if uploaded_excel:
                     )
 
                 # -----------------------------
-                # Pass A: Paragraph-level multiline replacer (kills tabs)
+                # Pass A: Paragraph-level multiline replacer (clears tabs)
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
                         _replace_multiline_paragraph(para, placeholders_upper, data)
 
                 # -----------------------------
-                # Pass B: Simple single-line in-run replacements
+                # Pass B: Cross-run replacement for single-line values
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
-                        _replace_simple_inrun(para, placeholders_upper, data)
+                        _replace_placeholders_across_runs(para, placeholders_upper, data)
 
                 # Save docx first
                 inter_buffer = BytesIO()

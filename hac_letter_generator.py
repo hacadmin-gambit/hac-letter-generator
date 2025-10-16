@@ -5,14 +5,13 @@ from docx.table import _Cell, Table
 from docx.text.run import Run
 from docx.shared import RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 import pandas as pd
 from io import BytesIO
 import os
 import re
 import zipfile
 
-# WordprocessingML namespace for Clark-notation XPath
-WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 st.set_page_config(page_title="HAC Letter Generator", layout="centered")
 st.title("📄 Hybrid Asset Custody Letter Generator")
@@ -167,11 +166,12 @@ def _to_2dp(value: str) -> str:
 def _clear_tab_stops(paragraph: Paragraph) -> None:
     """Remove all tab stops from a paragraph at the XML level."""
     # remove any <w:tabs> definitions
-    tabs_elems = paragraph._element.xpath(f'.//{{{WNS}}}tabs')
-    for tabs in tabs_elems:
-        parent = tabs.getparent()
-        if parent is not None:
-           parent.remove(tabs)
+    tabs_tag = qn('w:tabs')
+    for el in list(paragraph._element.iter()):
+        if el.tag == tabs_tag:
+            parent = el.getparent()
+            if parent is not None:
+                parent.remove(el)
 
 def _strip_tabs(s: str) -> str:
     return s.replace("\t", " ")

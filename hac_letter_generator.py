@@ -493,16 +493,17 @@ if uploaded_excel:
 # -----------------------------
 # Downloads & housekeeping
 # -----------------------------
-# -----------------------------
-# Downloads & housekeeping
-# -----------------------------
 if st.session_state.get("generated_docs"):
+    def safe_filename(name: str) -> str:
+        """Replace illegal path characters so ZIP doesn’t create folders."""
+        return re.sub(r'[\\/*?:"<>|]', "_", name)
+
     # Build a ZIP in memory containing all generated files
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in st.session_state["generated_docs"]:
-            # Each entry keeps the original filename inside the zip
-            zf.writestr(file["filename"], file["buffer"])
+            safe_name = safe_filename(file["filename"])
+            zf.writestr(safe_name, file["buffer"])
     zip_buffer.seek(0)
 
     # Download-all button
@@ -529,4 +530,3 @@ if st.session_state.get("generated_docs"):
         st.rerun()
 else:
     st.warning("📌 Please upload the Excel file to begin.")
-

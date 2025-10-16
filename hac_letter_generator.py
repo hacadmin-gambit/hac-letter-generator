@@ -230,11 +230,12 @@ if uploaded_excel:
                 data = {str(k).strip().upper(): ("" if pd.isna(v) else norm(str(v))) for k, v in row.items()}
 
                 # --- Amount formatting fix (exactly 2 decimals, no thousands comma) ---
-                if "AMOUNT" in data and data["AMOUNT"]:
-                    try:
-                        data["AMOUNT"] = f"{float(data['AMOUNT']):.2f}"
-                    except ValueError:
-                        pass
+                for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED"]:
+                    if field in data and data[field]:
+                        try:
+                            data["AMOUNT"] = f"{float(data['AMOUNT']):.2f}"
+                        except ValueError:
+                            pass
                 # --- End of amount fix ---
 
                 letter_type = norm(data.get("LETTER_TYPE", ""))

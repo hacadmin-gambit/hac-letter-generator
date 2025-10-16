@@ -38,11 +38,21 @@ template_options = {
 # -----------------------------
 
 def norm(s: str) -> str:
-    """Trim + collapse inner whitespace."""
+    """Trim and collapse inner spaces. Newlines removed."""
     return re.sub(r"\s+", " ", s.strip()) if isinstance(s, str) else ""
 
+def norm_multiline(s: str) -> str:
+    """Preserve intended line breaks from Excel cells."""
+    if s is None:
+        return ""
+    s = str(s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n").replace("\\n", "\n")
+    # Trim spaces around each line but keep \n
+    lines = [ln.strip() for ln in s.split("\n")]
+    return "\n".join(lines).strip()
+
 def extract_placeholders(doc: Document) -> set:
-    """Scan a Word document (paragraphs + tables) for all {{PLACEHOLDER}} tags and return a set of keys (original case)."""
+    """Find all {{PLACEHOLDER}} in paragraphs and tables."""
     placeholder_pattern = re.compile(r"{{(.*?)}}")
     found = set()
     for para in doc.paragraphs:
@@ -55,7 +65,7 @@ def extract_placeholders(doc: Document) -> set:
     return found
 
 def extract_placeholders_from_docx_bytes(docx_bytes: bytes) -> set:
-    """Scan all word/*.xml parts (including headers/footers/text boxes/shapes) for placeholders."""
+    """Scan all word/*.xml parts for placeholders, including headers/footers/shapes."""
     pattern = re.compile(r"{{(.*?)}}")
     found = set()
     with BytesIO(docx_bytes) as in_mem:
@@ -70,7 +80,7 @@ def extract_placeholders_from_docx_bytes(docx_bytes: bytes) -> set:
     return found
 
 def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_map: dict) -> bytes:
-    """Low-level XML replace across all word/*.xml parts to catch text in shapes, headers, and footers."""
+    """Low-level XML replace across word/*.xml parts to catch text in shapes, headers, and footers."""
     in_mem = BytesIO(docx_bytes)
     out_mem = BytesIO()
     with zipfile.ZipFile(in_mem, 'r') as zin, zipfile.ZipFile(out_mem, 'w', zipfile.ZIP_DEFLATED) as zout:
@@ -92,20 +102,18 @@ def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_m
     out_mem.seek(0)
     return out_mem.getvalue()
 
-# ---------- NEW: formatting helpers ----------
+# ---------- Formatting helpers ----------
 
 def _copy_run_format(src: Run, dst: Run) -> None:
     """Copy key inline styles from src to dst."""
     dst.bold = src.bold
     dst.italic = src.italic
     dst.underline = src.underline
-    # font attributes
     if src.font is not None:
         if src.font.size:
             dst.font.size = src.font.size
         if src.font.name:
             dst.font.name = src.font.name
-        # color
         try:
             rgb = src.font.color.rgb
             if isinstance(rgb, RGBColor):
@@ -117,11 +125,11 @@ def _replace_placeholders_preserving_runs(paragraph: Paragraph, placeholders_upp
     """
     Replace {{PLACEHOLDER}} even when split across runs.
     Keep formatting by applying the formatting of the run where the placeholder starts.
+    Supports multiline values by inserting line breaks.
     """
     if not paragraph.runs:
         return
 
-    # Build concatenated text with index map: [(run_idx, start_pos, end_pos)]
     runs = paragraph.runs
     concat = ""
     spans = []
@@ -130,16 +138,13 @@ def _replace_placeholders_preserving_runs(paragraph: Paragraph, placeholders_upp
         concat += r.text
         spans.append((idx, start, len(concat)))
 
-    # Make a quick lookup from absolute position to run index
     def _find_span(pos: int):
         for idx, s, e in spans:
             if s <= pos < e:
                 return idx, s, e
-        # end boundary case
         return spans[-1][0], spans[-1][1], spans[-1][2]
 
     changed = True
-    # Repeat until no more placeholders remain in this paragraph
     while changed:
         changed = False
         for orig, up in placeholders_upper.items():
@@ -152,40 +157,45 @@ def _replace_placeholders_preserving_runs(paragraph: Paragraph, placeholders_upp
             start_pos = pos
             end_pos = pos + len(needle)
 
-            run_start_idx, run_start_s, run_start_e = _find_span(start_pos)
-            run_end_idx, run_end_s, run_end_e = _find_span(end_pos - 1)
+            run_start_idx, run_start_s, _ = _find_span(start_pos)
+            run_end_idx, run_end_s, _ = _find_span(end_pos - 1)
 
             before_text = runs[run_start_idx].text[: start_pos - run_start_s]
             after_text = runs[run_end_idx].text[end_pos - run_end_s :]
 
-            # Replacement value
-            value = data_map.get(up, "")
+            value = str(data_map.get(up, ""))
 
-            # Put combined text into the starting run, preserve its formatting
-            runs[run_start_idx].text = before_text + value
+            # Prepare first run text
+            runs[run_start_idx].text = before_text
+
+            # Insert replacement with possible line breaks, preserving style
+            first = True
+            for i, line in enumerate(value.split("\n")):
+                if first:
+                    # append to the start run
+                    runs[run_start_idx].text += line
+                    first = False
+                else:
+                    r = paragraph.add_run()
+                    _copy_run_format(runs[run_start_idx], r)
+                    r.add_break()
+                    r.add_text(line)
 
             # Clear fully covered middle runs
             for i in range(run_start_idx + 1, run_end_idx):
                 runs[i].text = ""
 
-            # Put the trailing text into the end run
+            # Put trailing text back into the end run
             if run_end_idx != run_start_idx:
                 runs[run_end_idx].text = after_text
-                # Ensure formatting of the replacement text matches the start run formatting.
-                # The replacement sits inside run_start_idx, which already holds the right style.
-            # If same run, the style is already preserved.
 
-            # Copy style from the run where the placeholder started into run_start_idx explicitly
-            _copy_run_format(runs[run_start_idx], runs[run_start_idx])
-
-            # Rebuild concat and spans for the next loop
+            # Rebuild concat map
             concat = ""
             spans = []
-            for idx, r in enumerate(runs):
+            for idx, r in enumerate(paragraph.runs):
                 s = len(concat)
                 concat += r.text
                 spans.append((idx, s, len(concat)))
-            # break to restart placeholder search from first placeholder each loop
             break
 
 def _walk_block_items(doc: Document):
@@ -197,6 +207,19 @@ def _walk_block_items(doc: Document):
             for cell in row.cells:
                 for p in cell.paragraphs:
                     yield p
+
+def _to_2dp(value: str) -> str:
+    """Sanitize a numeric-like string and format to two decimals."""
+    s = str(value).strip()
+    # remove spaces, commas, currency and letters, keep digits, dot, minus
+    s = s.replace(",", "")
+    s = re.sub(r"[^0-9.\-]", "", s)
+    if s == "" or s == "." or s == "-" or s == "-.":
+        return ""
+    try:
+        return f"{float(s):.2f}"
+    except ValueError:
+        return ""
 
 # -----------------------------
 # UI — Excel upload
@@ -218,24 +241,32 @@ if uploaded_excel:
             st.error(f"Failed to read Excel: {e}")
             st.stop()
 
-        # Normalize headers (strip + UPPER to ensure consistent matching)
+        # Normalize headers to UPPER
         df.columns = [col.strip().upper() for col in df.columns]
 
-        st.session_state["generated_docs"] = []  # Clear previous outputs
+        st.session_state["generated_docs"] = []
         ok_count = 0
 
         for index, row in df.iterrows():
             try:
-                # Normalize row values; blanks become empty strings and keys forced to UPPER
-                data = {str(k).strip().upper(): ("" if pd.isna(v) else norm(str(v))) for k, v in row.items()}
+                # Build data from row as raw strings first
+                data = {}
+                for k, v in row.items():
+                    key = str(k).strip().upper()
+                    val = "" if pd.isna(v) else str(v)
+                    data[key] = val
 
-                # --- Amount formatting fix (exactly 2 decimals, no thousands comma) ---
+                # Preserve line breaks for any ADDRESS-like fields
+                for k in list(data.keys()):
+                    if "ADDRESS" in k:
+                        data[k] = norm_multiline(data[k])
+                    else:
+                        data[k] = norm(data[k])
+
+                # --- Amount formatting fix (2 decimals, sanitize inputs) ---
                 for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED", "TRUST_CAPITAL"]:
                     if field in data and data[field]:
-                        try:
-                            data[field] = f"{float(data[field]):.2f}"
-                        except ValueError:
-                            pass
+                        data[field] = _to_2dp(data[field])
                 # --- End of amount fix ---
 
                 letter_type = norm(data.get("LETTER_TYPE", ""))
@@ -282,43 +313,44 @@ if uploaded_excel:
                     )
 
                 # -----------------------------
-                # Pass 1: Run-level replacement (keeps formatting when fully inside a run)
+                # Pass 1: Simple in-run replacement with newline handling
                 # -----------------------------
                 for para in _walk_block_items(doc):
-                    for run in para.runs:
+                    for run in list(para.runs):
                         text = run.text
                         if "{{" not in text:
                             continue
                         for orig, up in placeholders_upper.items():
                             ph = f"{{{{{orig}}}}}"
                             if ph in text:
-                                value = data.get(up, "")
-                                parts = value.split("\n")
-                                if len(parts) > 1:
-                                    text = text.replace(ph, parts[0])
-                                    run.text = text
+                                value = str(data.get(up, ""))
+                                if "\n" in value:
+                                    parts = value.split("\n")
+                                    # set first part on current run
+                                    run.text = text.replace(ph, parts[0])
+                                    # append subsequent lines with breaks using new runs that copy the style
                                     for line in parts[1:]:
-                                        run.add_break()
-                                        run.add_text(line)
+                                        r = para.add_run()
+                                        _copy_run_format(run, r)
+                                        r.add_break()
+                                        r.add_text(line)
                                 else:
                                     run.text = text.replace(ph, value)
 
                 # -----------------------------
-                # Pass 2: Cross-run replacement with formatting preservation
-                #         (replaces placeholders split across runs)
+                # Pass 2: Cross-run replacement preserving formatting
                 # -----------------------------
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
                         _replace_placeholders_preserving_runs(para, placeholders_upper, data)
 
-                # Save docx from python-docx first
+                # Save docx first
                 inter_buffer = BytesIO()
                 doc.save(inter_buffer)
                 inter_bytes = inter_buffer.getvalue()
 
                 # -----------------------------
-                # Pass 3: Low-level XML replacement
-                # (handles placeholders in text boxes, headers/footers, etc.)
+                # Pass 3: Low-level XML replacement for headers/footers/shapes
                 # -----------------------------
                 final_bytes = replace_in_docx_bytes(inter_bytes, data, placeholders_upper)
 

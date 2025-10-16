@@ -233,7 +233,7 @@ if uploaded_excel:
                 for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED", "TRUST CAPITAL"]:
                     if field in data and data[field]:
                         try:
-                            data[field"] = f"{float(data[field]):.2f}"
+                            data[field] = f"{float(data[field]):.2f}"
                         except ValueError:
                             pass
                 # --- End of amount fix ---

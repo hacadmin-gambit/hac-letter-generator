@@ -36,6 +36,7 @@ template_options = {
     "Letter of Dividend Payout": "templates/Letter of Dividend Payout.docx",
     "Letter of Dividend Payout (RPS)": "templates/Letter of Dividend Payout (RPS).docx",
     "Letter of Dividend Payout (GGFT)": "templates/Letter of Dividend Payout (GGFT).docx",
+    "Mutual NDA": "templates/Mutual NDA.docx",
 }
 
 # -----------------------------

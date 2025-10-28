@@ -11,6 +11,7 @@ from io import BytesIO
 import os
 import re
 import zipfile
+import difflib
 
 
 st.set_page_config(page_title="HAC Letter Generator", layout="centered")
@@ -40,13 +41,39 @@ template_options = {
     "Marketing Consultancy and Services Agreement": "templates/Marketing Consultancy and Services Agreement.-v2.0-IND.docx",
 }
 
+# Normalized lookup maps to avoid Excel whitespace and case issues
+
+def _norm_key(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    s = s.replace("\u00A0", " ")
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+normalized_templates = {_norm_key(k): v for k, v in template_options.items()}
+_inverse_human_key = {_norm_key(k): k for k in template_options}
+
+# Optional: detect collisions where keys differ only by spacing/case
+_dups = {}
+for _k in template_options:
+    nk = _norm_key(_k)
+    _dups.setdefault(nk, []).append(_k)
+_collisions = {nk: v for nk, v in _dups.items() if len(v) > 1}
+if _collisions:
+    st.warning(f"Template keys that only differ by spacing/case: {_collisions}")
+
 # -----------------------------
 # Utilities
 # -----------------------------
 
 def norm(s: str) -> str:
-    """Trim and collapse inner spaces into one space."""
-    return re.sub(r"\s+", " ", s.strip()) if isinstance(s, str) else ""
+    """Trim, normalize non-breaking spaces, collapse inner whitespace. Keep original case for display."""
+    if not isinstance(s, str):
+        return ""
+    s = s.replace("\u00A0", " ")
+    return re.sub(r"\s+", " ", s.strip())
+
 
 def norm_multiline(s: str) -> str:
     """Preserve intended line breaks from Excel cells."""
@@ -57,11 +84,9 @@ def norm_multiline(s: str) -> str:
     lines = [ln.strip() for ln in s.split("\n")]
     return "\n".join(lines).strip()
 
+
 def auto_multiline_address(s: str) -> str:
-    """
-    If address is a single line, split on commas into neat lines.
-    Keep existing line breaks if already present. Preserve commas at line ends.
-    """
+    """If address is a single line, split on commas into neat lines. Keep existing line breaks if already present."""
     if s is None:
         return ""
     s = str(s)
@@ -70,6 +95,7 @@ def auto_multiline_address(s: str) -> str:
         return "\n".join(part.strip() for part in s.split("\n") if part.strip())
     parts = [p.strip() for p in s.split(",") if p.strip()]
     return "\n".join(f"{p}," if i < len(parts) - 1 else p for i, p in enumerate(parts))
+
 
 def extract_placeholders(doc: Document) -> set:
     """Find all {{PLACEHOLDER}} in paragraphs and tables."""
@@ -83,6 +109,7 @@ def extract_placeholders(doc: Document) -> set:
                 for para in cell.paragraphs:
                     found.update(placeholder_pattern.findall(para.text))
     return found
+
 
 def extract_placeholders_from_docx_bytes(docx_bytes: bytes) -> set:
     """Scan all word/*.xml parts for placeholders, including headers/footers/shapes."""
@@ -98,6 +125,7 @@ def extract_placeholders_from_docx_bytes(docx_bytes: bytes) -> set:
                         continue
                     found.update(pattern.findall(xml_text))
     return found
+
 
 def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_map: dict) -> bytes:
     """Low-level XML replace across word/*.xml parts to catch text in shapes, headers, and footers."""
@@ -116,7 +144,6 @@ def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_m
                     ph = '{{' + orig + '}}'
                     val = mapping.get(up, '') or ''
                     if ph in xml_text:
-                        # also soften tabs adjacent to placeholders in these parts
                         xml_text = xml_text.replace("\t" + ph, ph).replace(ph + "\t", ph)
                         xml_text = xml_text.replace(ph, str(val))
                 data_bytes = xml_text.encode('utf-8')
@@ -127,7 +154,6 @@ def replace_in_docx_bytes(docx_bytes: bytes, mapping: dict, placeholders_upper_m
 # ---------- Formatting helpers ----------
 
 def _copy_run_format(src: Run, dst: Run) -> None:
-    """Copy key inline styles from src to dst."""
     dst.bold = src.bold
     dst.italic = src.italic
     dst.underline = src.underline
@@ -143,8 +169,8 @@ def _copy_run_format(src: Run, dst: Run) -> None:
         except Exception:
             pass
 
+
 def _add_run_copy_style(paragraph: Paragraph, src_run: Run, text: str = "", add_line_break: bool = False) -> Run:
-    """Add a run, cloning inline style from src_run, and optionally add a line break first."""
     r = paragraph.add_run()
     r.bold = src_run.bold
     r.italic = src_run.italic
@@ -165,8 +191,8 @@ def _add_run_copy_style(paragraph: Paragraph, src_run: Run, text: str = "", add_
         r.add_text(text)
     return r
 
+
 def _walk_block_items(doc: Document):
-    """Yield all paragraphs from the document, including those in tables."""
     for p in doc.paragraphs:
         yield p
     for table in doc.tables:
@@ -175,8 +201,8 @@ def _walk_block_items(doc: Document):
                 for p in cell.paragraphs:
                     yield p
 
+
 def _to_2dp(value: str) -> str:
-    """Sanitize a numeric-like string and format to two decimals."""
     s = str(value).strip()
     s = s.replace(",", "")
     s = re.sub(r"[^0-9.\-]", "", s)
@@ -190,7 +216,6 @@ def _to_2dp(value: str) -> str:
 # -------- Address paragraph helpers (tab cleanup) --------
 
 def _clear_tab_stops(paragraph: Paragraph) -> None:
-    """Remove all <w:tabs> descendants from this paragraph, no XPath needed."""
     tabs_tag = qn('w:tabs')
     for el in list(paragraph._element.iter()):
         if el.tag == tabs_tag:
@@ -198,18 +223,13 @@ def _clear_tab_stops(paragraph: Paragraph) -> None:
             if parent is not None:
                 parent.remove(el)
 
+
 def _strip_tabs(s: str) -> str:
     return s.replace("\t", " ")
 
 # -------- Multiline paragraph rebuild (handles ADDRESS neatly) --------
 
 def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> bool:
-    """
-    For values containing newline(s), rebuild the paragraph cleanly:
-    - clear tab stops and tab characters
-    - insert hard line breaks
-    - keep formatting by cloning from a source run
-    """
     text = paragraph.text
     did = False
 
@@ -221,7 +241,6 @@ def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict,
         if ph in text and ("\n" in value):
             did = True
 
-            # Clean tabs and tab stops to prevent column effects
             text = _strip_tabs(text.replace("\t" + ph, ph).replace(ph + "\t", ph))
             _clear_tab_stops(paragraph)
             paragraph.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -229,24 +248,20 @@ def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict,
 
             before, after = text.split(ph, 1)
 
-            # Clear paragraph
             for r in list(paragraph.runs):
                 r.text = ""
             paragraph.text = ""
 
-            # Write "before" without forcing a newline
             before = before.rstrip()
             if before:
                 _add_run_copy_style(paragraph, src_run, before)
 
-            # Write multiline value
             lines = [ln.rstrip() for ln in value.split("\n")]
             if lines:
                 _add_run_copy_style(paragraph, src_run, lines[0])
                 for line in lines[1:]:
                     _add_run_copy_style(paragraph, src_run, line, add_line_break=True)
 
-            # Write "after" on a new visual line only if text exists
             after = after.lstrip()
             if after:
                 _add_run_copy_style(paragraph, src_run, after, add_line_break=True)
@@ -257,10 +272,6 @@ def _replace_multiline_paragraph(paragraph: Paragraph, placeholders_upper: dict,
 # -------- Cross-run replacer for single-line placeholders --------
 
 def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: dict, data_map: dict) -> None:
-    """
-    Replace {{PLACEHOLDER}} even when split across runs.
-    Handles single-line values. Preserves formatting of the starting run.
-    """
     if not paragraph.runs:
         return
 
@@ -289,7 +300,6 @@ def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: 
 
             value = str(data_map.get(up, ""))
             if "\n" in value:
-                # multiline handled by the paragraph rebuild pass
                 continue
 
             changed = True
@@ -308,7 +318,6 @@ def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: 
             if re_idx != rs_idx:
                 runs[re_idx].text = after
 
-            # rebuild concat
             concat = ""
             spans = []
             for idx, r in enumerate(paragraph.runs):
@@ -320,13 +329,10 @@ def _replace_placeholders_across_runs(paragraph: Paragraph, placeholders_upper: 
 # -------- Document cleanup to avoid blank last page --------
 
 def _strip_page_breaks(doc: Document) -> None:
-    """Remove manual page breaks and 'page break before' flags."""
-    # Turn off "page break before" everywhere
     for p in doc.paragraphs:
         if p.paragraph_format:
             p.paragraph_format.page_break_before = False
 
-    # Remove manual page-break BRs inside runs
     br_tag = qn('w:br')
     type_attr = qn('w:type')
     for p in doc.paragraphs:
@@ -335,8 +341,8 @@ def _strip_page_breaks(doc: Document) -> None:
                 if el.tag == br_tag and el.get(type_attr) == 'page':
                     r._r.remove(el)
 
+
 def _remove_trailing_blank_paragraphs(doc: Document) -> None:
-    """Drop empty tail paragraphs that can trigger an extra page."""
     while doc.paragraphs:
         p = doc.paragraphs[-1]
         txt = p.text.strip()
@@ -376,7 +382,7 @@ if uploaded_excel:
 
         for index, row in df.iterrows():
             try:
-                # Build raw data from row (no normalization yet)
+                # Build raw data from row
                 data = {}
                 for k, v in row.items():
                     key = str(k).strip().upper()
@@ -398,33 +404,42 @@ if uploaded_excel:
                     else:
                         data[k] = norm(data[k])
 
-                # --- Amount formatting fix (2 decimals, sanitize inputs) ---
+                # Amount formatting to two decimals
                 for field in ["AMOUNT", "DIVIDEND", "ACCUMULATED", "TRUST_CAPITAL"]:
                     if field in data and data[field]:
                         data[field] = _to_2dp(data[field])
-                # --- End of amount fix ---
 
-                # --- Add tab spacing for MONTH placeholder ---
+                # Month tab spacing if Month is like "October 2025"
                 if "MONTH" in data and re.match(r"^[A-Za-z]+\s+\d{4}$", data["MONTH"]):
-                    # Converts "October 2025" → "October\t2025"
-                    data["MONTH"] = re.sub(r"\s+(\d{4})", r"\t\1", data["MONTH"])
-                # --- End of month tab fix ---
+                    data["MONTH"] = re.sub(r"\s+(\d{4})", r"\t\1", data["MONTH"]) 
 
-                # Final normalized types for downstream logic
-                letter_type = norm(letter_type_raw)
-                payout_type = norm(data.get("PAYOUT_TYPE", ""))
+                # Build the normalized lookup key
+                letter_type_clean = _norm_key(letter_type_raw)
+                payout_type_clean = _norm_key(data.get("PAYOUT_TYPE", ""))
 
-                if not letter_type:
+                if not letter_type_clean:
                     st.warning(f"Row {index+1}: LETTER_TYPE is empty. Skipping.")
                     continue
 
-                # Build template key safely
-                template_key = f"{letter_type} ({payout_type})" if letter_type == "Letter of Affirmation" else letter_type
-                template_path = template_options.get(template_key)
+                if letter_type_clean == _norm_key("Letter of Affirmation") and payout_type_clean in ("quarterly", "yearly"):
+                    lookup_key = _norm_key(f"Letter of Affirmation ({data.get('PAYOUT_TYPE', '').strip()})")
+                    template_key_human = f"Letter of Affirmation ({data.get('PAYOUT_TYPE', '').strip()})"
+                else:
+                    lookup_key = letter_type_clean
+                    template_key_human = letter_type_raw.strip()
+
+                template_path = normalized_templates.get(lookup_key)
 
                 if not template_path:
-                    st.warning(f"Row {index+1}: Template key not found → '{template_key}'. Check spelling/casing/spaces.")
+                    # Suggest closest match
+                    suggestion = difflib.get_close_matches(lookup_key, list(normalized_templates.keys()), n=1, cutoff=0.6)
+                    warn = f"Row {index+1}: Template key not found → '{template_key_human}'."
+                    if suggestion:
+                        human_guess = _inverse_human_key.get(suggestion[0], suggestion[0])
+                        warn += f" Did you mean '{human_guess}'?"
+                    st.warning(warn)
                     continue
+
                 if not os.path.exists(template_path):
                     st.warning(f"Row {index+1}: Template path does not exist → {template_path}")
                     continue
@@ -449,27 +464,23 @@ if uploaded_excel:
                     if len(xml_ph) > 12:
                         sample += ", …"
                     st.info(
-                        f"Row {index+1}: template='{template_key}'\n"
+                        f"Row {index+1}: template='{template_key_human}'\n"
                         f"Path='{template_path}'\n"
                         f"Placeholders (docx XML)={len(xml_ph)} → {sample}"
                     )
 
-                # -----------------------------
-                # Pass A: Paragraph-level multiline replacer (ONLY for Dividend)
-                # -----------------------------
+                # Pass A: Paragraph-level multiline replacer for Dividend templates
                 if is_dividend:
                     for para in _walk_block_items(doc):
                         if "{{" in para.text:
                             _replace_multiline_paragraph(para, placeholders_upper, data)
 
-                # -----------------------------
-                # Pass B: Cross-run replacement for single-line values (all)
-                # -----------------------------
+                # Pass B: Cross-run replacement for single-line values
                 for para in _walk_block_items(doc):
                     if "{{" in para.text:
                         _replace_placeholders_across_runs(para, placeholders_upper, data)
 
-                # Clean document to avoid stray blank pages (ONLY for Dividend)
+                # Clean document to avoid stray blank pages for Dividend
                 if is_dividend:
                     _strip_page_breaks(doc)
                     _remove_trailing_blank_paragraphs(doc)
@@ -479,13 +490,11 @@ if uploaded_excel:
                 doc.save(inter_buffer)
                 inter_bytes = inter_buffer.getvalue()
 
-                # -----------------------------
-                # Pass C: Low-level XML replacement for headers/footers/shapes (all)
-                # -----------------------------
+                # Pass C: Low-level XML replacement for headers/footers/shapes
                 final_bytes = replace_in_docx_bytes(inter_bytes, data, placeholders_upper)
 
                 name_part = data.get("NAME", "Client")
-                filename = f"{name_part} - {template_key}.docx"
+                filename = f"{name_part} - {template_key_human}.docx"
 
                 st.session_state["generated_docs"].append({
                     "filename": filename,
@@ -497,19 +506,17 @@ if uploaded_excel:
                 st.error(f"Row {index+1} failed: {e}")
 
         if ok_count == 0:
-            st.warning("No files were generated. Check the warnings/errors above.")
+            st.warning("No files were generated. Check the warnings or errors above.")
         else:
             st.success(f"✅ Generated {ok_count} file(s). See download buttons below.")
 
 # -----------------------------
-# Downloads & housekeeping
+# Downloads and housekeeping
 # -----------------------------
 if st.session_state.get("generated_docs"):
     def safe_filename(name: str) -> str:
-        """Replace illegal path characters so ZIP doesn’t create folders."""
         return re.sub(r'[\\/*?:"<>|]', "_", name)
 
-    # Build a ZIP in memory containing all generated files
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in st.session_state["generated_docs"]:
@@ -517,7 +524,6 @@ if st.session_state.get("generated_docs"):
             zf.writestr(safe_name, file["buffer"])
     zip_buffer.seek(0)
 
-    # Download-all button
     st.download_button(
         label="📦 Download all as ZIP",
         data=zip_buffer,
@@ -526,7 +532,6 @@ if st.session_state.get("generated_docs"):
         key="download_all_zip",
     )
 
-    # Individual file buttons
     for i, file in enumerate(st.session_state["generated_docs"]):
         st.download_button(
             label=f"🗕️ Download: {file['filename']}",
